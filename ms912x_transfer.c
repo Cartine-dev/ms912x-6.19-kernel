@@ -230,6 +230,12 @@ int ms912x_fb_send_rect(struct drm_framebuffer *fb, const struct iosys_map *map,
 	/* Seems like hardware can only update framebuffer 
 	 * in multiples of 16 horizontally
 	 */
+	/* Force full-frame update to eliminate ghost artifacts */
+	rect->x1 = 0;
+	rect->y1 = 0;
+	rect->x2 = fb->width;
+	rect->y2 = fb->height;
+
 	x = ALIGN_DOWN(rect->x1, 16);
 	/* Resolutions that are not a multiple of 16 like 1366*768 
 	 * need to be aligned
