@@ -219,7 +219,7 @@ int ms912x_fb_send_rect(struct drm_framebuffer *fb, const struct iosys_map *map,
 {
 	struct ms912x_device *ms912x = to_ms912x(fb->dev);
 	unsigned long now = jiffies;
-	if (time_before(now, ms912x->last_send_jiffies + msecs_to_jiffies(16)))
+	if (time_before(now, ms912x->last_send_jiffies + msecs_to_jiffies(33)))
 		return 0;
 
 	int ret = 0, idx;
@@ -257,7 +257,7 @@ int ms912x_fb_send_rect(struct drm_framebuffer *fb, const struct iosys_map *map,
 
 	/* Sending frames too fast, drop it */
 	if (!wait_for_completion_timeout(&prev_request->done,
-					 msecs_to_jiffies(1))) {
+					 msecs_to_jiffies(40))) {
 		ret = -ETIMEDOUT;
 		goto dev_exit;
 	}
