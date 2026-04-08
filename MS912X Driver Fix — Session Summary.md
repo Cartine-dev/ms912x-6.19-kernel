@@ -100,3 +100,32 @@ hyprctl dispatch exit
 > ⚠️ **Confirm which folder DKMS is using** at the start of the next session with:
 > ```bash > grep "1920" ~/ms912x-6.19-kernel/ms912x_drv.c > grep "1920" ~/ms912x-fix/ms912x_drv.c > ```
 
+---
+O issue #23 "Performance issues over USB 2.0 on Manjaro Gnome Wayland" é exatamente o seu problema. Infelizmente, está **aberto e sem solução** desde novembro de 2024 .
+
+## A Realidade do Lag com MS912X + USB 2.0
+
+O lag que você sente **é uma limitação física do hardware**, não um bug do driver. A razão é matemática:
+
+| Fator | Valor |
+|---|---|
+| Resolução | 1920×1080 |
+| Bytes por pixel (YUV422) | 2 bytes |
+| Tamanho do frame | ~4MB |
+| Banda USB 2.0 disponível | ~40MB/s real |
+| Tempo de transmissão por frame | ~100ms |
+| FPS máximo teórico | ~10fps real |
+
+O chip MS912X usa compressão para chegar nos 30fps, mas há overhead de encode YUV + transferência USB + decode no chip que cria **latência inerente de 100–200ms** .
+
+## O Que Dá Para Tentar Ainda
+
+- **USB 3.0** — Se sua máquina tem porta USB 3.0 e você conectar o adaptador nela (mesmo que o cabo seja 2.0), a banda dobra e o lag cai significativamente
+- **Reduzir a resolução** da tela externa para 1280×720 — o frame fica 4x menor, melhorando muito o lag:
+  ```bash
+  # No ~/.config/hypr/monitors.conf
+  monitor=<nome_do_monitor_externo>,1280x720@30,auto,1
+  ```
+- **Aceitar o lag** — para uso com browser, editor de texto e coisas não interativas, 100-200ms é tolerável
+
+O problema de **mouse clonado** que você tinha (issue #29 no repo) você já resolveu com o full-frame fix. O lag infelizmente é a natureza do USB 2.0 display adapter .
