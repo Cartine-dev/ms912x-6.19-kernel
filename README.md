@@ -27,7 +27,18 @@ Driver is written by analyzing wireshark captures of the device.
 
 ## DKMS
 
-Run `sudo dkms install .`
+For Arch `linux-lts` on `6.18.25-1-lts`, build against the target kernel explicitly:
+
+- `make clean KVER=6.18.25-1-lts`
+- `make KVER=6.18.25-1-lts`
+- `sudo dkms remove ms912x/0.1 --all`
+- `sudo dkms install . -k 6.18.25-1-lts`
+- `sudo depmod 6.18.25-1-lts`
+- `modinfo ms912x | grep vermagic`
+
+Expected `vermagic` is `6.18.25-1-lts`.
+
+For the USB 2.0 `534d:6021` adapter, the working 1080p mode is `1920x1080@30`, not `1920x1080@60`.
 
 - make clean
 - make all -j
@@ -36,5 +47,4 @@ Run `sudo dkms install .`
 - sudo insmod ms912x.ko
 
 Forked From: https://github.com/rhgndf/ms912x
-
 
