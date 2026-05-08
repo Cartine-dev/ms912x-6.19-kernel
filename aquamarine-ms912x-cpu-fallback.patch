@@ -1,0 +1,283 @@
+diff --git i/include/aquamarine/backend/DRM.hpp w/include/aquamarine/backend/DRM.hpp
+index f85c8de..1edcadf 100644
+--- i/include/aquamarine/backend/DRM.hpp
++++ w/include/aquamarine/backend/DRM.hpp
+@@ -429,6 +429,7 @@ namespace Aquamarine {
+         struct {
+             Hyprutils::Memory::CSharedPointer<IAllocator>   allocator;
+             Hyprutils::Memory::CSharedPointer<CDRMRenderer> renderer; // may be null if creation fails
++            bool                                            cpuCopyFallback = false;
+         } rendererState;
+ 
+         Hyprutils::Memory::CWeakPointer<CBackend>                     backend;
+diff --git i/src/backend/drm/DRM.cpp w/src/backend/drm/DRM.cpp
+index 0ae0434..668ec44 100644
+--- i/src/backend/drm/DRM.cpp
++++ w/src/backend/drm/DRM.cpp
+@@ -93,6 +93,134 @@ static int gpuNumBuiltinPanels(const SP<CSessionDevice> gpu) {
+     return num;
+ }
+ 
++static bool hasFormat(const std::vector<SDRMFormat>& formats, uint32_t drmFormat) {
++    return std::ranges::any_of(formats, [drmFormat](const auto& fmt) { return fmt.drmFormat == drmFormat; });
++}
++
++static uint32_t pickCPUCopyFormat(const std::vector<SDRMFormat>& formats) {
++    static constexpr std::array<uint32_t, 4> preferredFormats = {
++        DRM_FORMAT_XRGB8888,
++        DRM_FORMAT_ARGB8888,
++        DRM_FORMAT_XBGR8888,
++        DRM_FORMAT_ABGR8888,
++    };
++
++    for (const auto format : preferredFormats) {
++        if (hasFormat(formats, format))
++            return format;
++    }
++
++    return DRM_FORMAT_INVALID;
++}
++
++static bool copyRGBA8ToDRMDumb(SP<CBackend> backend, SP<IBuffer> dstBuffer, const std::vector<uint8_t>& srcRGBA, const Hyprutils::Math::Vector2D& size) {
++    if (!dstBuffer || !(dstBuffer->caps() & BUFFER_CAPABILITY_DATAPTR)) {
++        backend->log(AQ_LOG_ERROR, "drm: CPU copy fallback requires a destination buffer with CPU mapping");
++        return false;
++    }
++
++    auto dma = dstBuffer->dmabuf();
++    if (!dma.success || dma.strides.at(0) == 0) {
++        backend->log(AQ_LOG_ERROR, "drm: CPU copy fallback got an invalid destination dmabuf");
++        return false;
++    }
++
++    auto [dstData, dstFormat, dstLen] = dstBuffer->beginDataPtr(0);
++    if (!dstData) {
++        backend->log(AQ_LOG_ERROR, "drm: CPU copy fallback couldn't map the destination buffer");
++        return false;
++    }
++
++    const auto width      = (size_t)size.x;
++    const auto height     = (size_t)size.y;
++    const auto srcStride  = width * 4;
++    const auto dstStride  = (size_t)dma.strides.at(0);
++    const auto bytesNeeded = dstStride * height;
++
++    if (srcRGBA.size() < srcStride * height || dstLen < bytesNeeded) {
++        dstBuffer->endDataPtr();
++        backend->log(AQ_LOG_ERROR, "drm: CPU copy fallback buffer sizing mismatch");
++        return false;
++    }
++
++    auto writePixel = [&](uint8_t* dst, const uint8_t* src) {
++        switch (dstFormat) {
++            case DRM_FORMAT_XRGB8888:
++                dst[0] = src[2];
++                dst[1] = src[1];
++                dst[2] = src[0];
++                dst[3] = 0xFF;
++                return true;
++            case DRM_FORMAT_ARGB8888:
++                dst[0] = src[2];
++                dst[1] = src[1];
++                dst[2] = src[0];
++                dst[3] = src[3];
++                return true;
++            case DRM_FORMAT_XBGR8888:
++                dst[0] = src[0];
++                dst[1] = src[1];
++                dst[2] = src[2];
++                dst[3] = 0xFF;
++                return true;
++            case DRM_FORMAT_ABGR8888:
++                dst[0] = src[0];
++                dst[1] = src[1];
++                dst[2] = src[2];
++                dst[3] = src[3];
++                return true;
++            default: return false;
++        }
++    };
++
++    bool ok = true;
++    for (size_t y = 0; y < height; ++y) {
++        const auto* srcRow = srcRGBA.data() + (y * srcStride);
++        auto*       dstRow = dstData + (y * dstStride);
++        for (size_t x = 0; x < width; ++x) {
++            if (!writePixel(dstRow + x * 4, srcRow + x * 4)) {
++                ok = false;
++                break;
++            }
++        }
++        if (!ok)
++            break;
++    }
++
++    dstBuffer->endDataPtr();
++
++    if (!ok)
++        backend->log(AQ_LOG_ERROR, std::format("drm: CPU copy fallback doesn't support destination format {}", fourccToName(dstFormat)));
++
++    return ok;
++}
++
++static bool cpuCopyBlitToSecondary(SP<CBackend> logBackend, SP<IBuffer> source, SP<IBuffer> destination, SP<CDRMRenderer> primaryRenderer) {
++    if (!logBackend || !source || !destination || !primaryRenderer) {
++        if (logBackend)
++            logBackend->log(AQ_LOG_ERROR, "drm: CPU copy fallback missing source, destination, or primary renderer");
++        return false;
++    }
++
++    const auto srcDMA = source->dmabuf();
++    const auto dstDMA = destination->dmabuf();
++    if (!srcDMA.success || !dstDMA.success) {
++        logBackend->log(AQ_LOG_ERROR, "drm: CPU copy fallback requires dmabuf source and destination");
++        return false;
++    }
++
++    if (srcDMA.size != dstDMA.size) {
++        logBackend->log(AQ_LOG_ERROR, "drm: CPU copy fallback got mismatched source and destination sizes");
++        return false;
++    }
++
++    std::vector<uint8_t> rgba;
++    rgba.resize((size_t)srcDMA.size.x * (size_t)srcDMA.size.y * 4);
++    primaryRenderer->readBuffer(source, rgba);
++
++    return copyRGBA8ToDRMDumb(logBackend, destination, rgba, srcDMA.size);
++}
++
+ static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
+     auto enumerate = enumDRMCards(backend->session->udevHandle);
+ 
+@@ -605,6 +733,8 @@ bool Aquamarine::CDRMBackend::shouldBlit() {
+ }
+ 
+ bool Aquamarine::CDRMBackend::initMgpu() {
++    rendererState.cpuCopyFallback = false;
++
+     SP<CGBMAllocator> newAllocator;
+     if (primary || backend->primaryAllocator->type() != AQ_ALLOCATOR_TYPE_GBM) {
+         newAllocator            = CGBMAllocator::create(backend->reopenDRMNode(gpu->fd), backend);
+@@ -622,6 +752,13 @@ bool Aquamarine::CDRMBackend::initMgpu() {
+     rendererState.renderer = CDRMRenderer::attempt(backend.lock(), gpu->renderNodeFd >= 0 ? gpu->renderNodeFd : gpu->fd);
+ 
+     if (!rendererState.renderer) {
++        if (primary && dumbAllocator && primary->rendererState.renderer) {
++            rendererState.allocator       = dumbAllocator;
++            rendererState.cpuCopyFallback = true;
++            backend->log(AQ_LOG_WARNING, std::format("drm: initMgpu: no renderer on {}, enabling CPU copy fallback with drm_dumb buffers", gpu->path));
++            return true;
++        }
++
+         backend->log(AQ_LOG_ERROR, "drm: initMgpu: no renderer");
+         return false;
+     }
+@@ -638,7 +775,7 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
+         return true;
+ 
+     if (!primary) {
+-        if (rendererState.renderer && rendererState.allocator)
++        if ((rendererState.renderer || rendererState.cpuCopyFallback) && rendererState.allocator)
+             return true;
+ 
+         return initMgpu();
+@@ -648,14 +785,14 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
+         std::ranges::any_of(connectors, [](const auto& c) { return c->status == DRM_MODE_CONNECTED && c->output && c->output->state && c->output->state->state().enabled; });
+ 
+     if (hasEnabledOutputs) {
+-        if (rendererState.renderer && rendererState.allocator)
++        if ((rendererState.renderer || rendererState.cpuCopyFallback) && rendererState.allocator)
+             return true;
+ 
+         backend->log(AQ_LOG_DEBUG, std::format("drm: Initializing secondary renderer on {}, has enabled outputs", gpu->path));
+         return initMgpu();
+     }
+ 
+-    if (!rendererState.renderer && !rendererState.allocator)
++    if (!rendererState.renderer && !rendererState.allocator && !rendererState.cpuCopyFallback)
+         return true;
+ 
+     backend->log(AQ_LOG_DEBUG, std::format("drm: Deinitializing secondary renderer on {}, no enabled outputs", gpu->path));
+@@ -672,6 +809,7 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
+ 
+     rendererState.renderer.reset();
+     rendererState.allocator.reset();
++    rendererState.cpuCopyFallback = false;
+ 
+     return true;
+ }
+@@ -1920,9 +2058,10 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+         SP<CDRMFB> drmFB;
+ 
+         if (backend->shouldBlit()) {
+-            if (!backend->rendererState.renderer) {
++            if (!backend->rendererState.renderer && !backend->rendererState.cpuCopyFallback) {
+                 backend->backend->log(AQ_LOG_DEBUG, "drm: No renderer attached to backend when required for blitting, initializing");
+-                if (!backend->initMgpu() || !backend->rendererState.renderer || !backend->rendererState.allocator) {
++                if (!backend->initMgpu() || !backend->rendererState.allocator ||
++                    (!backend->rendererState.renderer && !backend->rendererState.cpuCopyFallback)) {
+                     backend->backend->log(AQ_LOG_ERROR, "drm: Failed to initialize renderer backend for blitting");
+                     return false;
+                 }
+@@ -1938,11 +2077,17 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+             auto OPTIONS = swapchain->currentOptions();
+             auto bufDma  = STATE.buffer->dmabuf();
+             OPTIONS.size = STATE.buffer->size;
+-            if (OPTIONS.format == DRM_FORMAT_INVALID)
++            if (backend->rendererState.cpuCopyFallback)
++                OPTIONS.format = pickCPUCopyFormat(getRenderFormats());
++            else if (OPTIONS.format == DRM_FORMAT_INVALID)
+                 OPTIONS.format = bufDma.format;
+             OPTIONS.multigpu = false; // this is not a shared swapchain, and additionally, don't make it linear, nvidia would be mad
+             OPTIONS.cursor   = false;
+             OPTIONS.scanout  = true;
++            if (OPTIONS.format == DRM_FORMAT_INVALID) {
++                backend->backend->log(AQ_LOG_ERROR, "drm: CPU copy fallback couldn't find a supported 32bpp scanout format");
++                return false;
++            }
+             if (!mgpu.swapchain->reconfigure(OPTIONS)) {
+                 backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but the mgpu swapchain failed reconfiguring");
+                 return false;
+@@ -1952,20 +2097,30 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+             SP<Aquamarine::CDRMRenderer> primaryRenderer;
+             if (backend->primary)
+                 primaryRenderer = backend->primary->rendererState.renderer;
+-            auto blitResult = backend->rendererState.renderer->blit(
+-                STATE.buffer, NEWAQBUF, primaryRenderer, (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE) ? STATE.explicitInFence : -1);
+-            if (!blitResult.success) {
+-                backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but blit failed");
+-                return false;
+-            }
++            if (backend->rendererState.cpuCopyFallback) {
++                if (!cpuCopyBlitToSecondary(backend->backend.lock(), STATE.buffer, NEWAQBUF, primaryRenderer)) {
++                    backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but CPU copy fallback failed");
++                    return false;
++                }
+ 
+-            // replace the explicit in fence if the blitting backend returned one, otherwise discard old. Passed fence from the client is wrong.
+-            // if the commit doesn't have an explicit fence, don't use the one we created, just fallback to implicit
+-            static auto NO_EXPLICIT = envEnabled("AQ_MGPU_NO_EXPLICIT");
+-            if (blitResult.syncFD.has_value() && !NO_EXPLICIT && (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE))
+-                state->setExplicitInFence(blitResult.syncFD.value());
+-            else
+                 state->setExplicitInFence(-1);
++                backend->backend->log(AQ_LOG_DEBUG, std::format("drm: CPU copy fallback prepared a scanout buffer on {}", backend->gpu->path));
++            } else {
++                auto blitResult = backend->rendererState.renderer->blit(
++                    STATE.buffer, NEWAQBUF, primaryRenderer, (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE) ? STATE.explicitInFence : -1);
++                if (!blitResult.success) {
++                    backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but blit failed");
++                    return false;
++                }
++
++                // replace the explicit in fence if the blitting backend returned one, otherwise discard old. Passed fence from the client is wrong.
++                // if the commit doesn't have an explicit fence, don't use the one we created, just fallback to implicit
++                static auto NO_EXPLICIT = envEnabled("AQ_MGPU_NO_EXPLICIT");
++                if (blitResult.syncFD.has_value() && !NO_EXPLICIT && (COMMITTED & COutputState::eOutputStateProperties::AQ_OUTPUT_STATE_EXPLICIT_IN_FENCE))
++                    state->setExplicitInFence(blitResult.syncFD.value());
++                else
++                    state->setExplicitInFence(-1);
++            }
+ 
+             drmFB = CDRMFB::create(NEWAQBUF, backend, nullptr); // will return attachment if present
+         } else

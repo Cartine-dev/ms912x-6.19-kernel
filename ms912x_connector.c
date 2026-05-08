@@ -1,6 +1,7 @@
 #include <drm/drm_atomic_state_helper.h>
 #include <drm/drm_connector.h>
 #include <drm/drm_edid.h>
+#include <drm/drm_modes.h>
 #include <drm/drm_modeset_helper_vtables.h>
 #include <drm/drm_probe_helper.h>
 
@@ -30,29 +31,32 @@ static int ms912x_read_edid(void *data, u8 *buf, unsigned int block, size_t len)
 	return ret;
 }
 
-static void ms912x_add_fallback_mode(struct drm_connector *connector)
+static int ms912x_add_mode(struct drm_connector *connector, int width,
+			   int height, int refresh, bool preferred)
 {
 	struct drm_display_mode *mode;
 
-	mode = drm_mode_create(connector->dev);
+	mode = drm_cvt_mode(connector->dev, width, height, refresh, true,
+			    false, false);
 	if (!mode)
-		return;
+		return 0;
 
+	mode->type = DRM_MODE_TYPE_DRIVER;
+	if (preferred)
+		mode->type |= DRM_MODE_TYPE_PREFERRED;
 	drm_mode_set_name(mode);
-	mode->type = DRM_MODE_TYPE_DRIVER | DRM_MODE_TYPE_PREFERRED;
-
-	mode->clock = 65000;
-	mode->hdisplay = 1024;
-	mode->hsync_start = 1048;
-	mode->hsync_end = 1184;
-	mode->htotal = 1344;
-	mode->vdisplay = 768;
-	mode->vsync_start = 771;
-	mode->vsync_end = 777;
-	mode->vtotal = 806;
-	mode->flags = DRM_MODE_FLAG_NHSYNC | DRM_MODE_FLAG_NVSYNC;
-
 	drm_mode_probed_add(connector, mode);
+	return 1;
+}
+
+static int ms912x_add_safe_modes(struct drm_connector *connector)
+{
+	/*
+	 * The bridge reads monitor EDID, but this adapter has only been
+	 * validated at 1080p30. Exposing EDID modes such as 1680x1050@60 lets
+	 * compositors pick timings that stall the USB path or leave output black.
+	 */
+	return ms912x_add_mode(connector, 1920, 1080, 30, true);
 }
 
 static int ms912x_connector_get_modes(struct drm_connector *connector)
@@ -63,9 +67,8 @@ static int ms912x_connector_get_modes(struct drm_connector *connector)
 
 	edid = drm_edid_read_custom(connector, ms912x_read_edid, ms912x);
 	if (!edid) {
-		pr_warn("ms912x: EDID not found, falling back to default mode\n");
-		ms912x_add_fallback_mode(connector);
-		return 1;
+		pr_warn("ms912x: EDID not found, using safe 1080p30 mode\n");
+		return ms912x_add_safe_modes(connector);
 	}
 
 	ret = drm_edid_connector_update(connector, edid);
@@ -75,7 +78,7 @@ static int ms912x_connector_get_modes(struct drm_connector *connector)
 		goto edid_free;
 	}
 
-	ret = drm_edid_connector_add_modes(connector);
+	ret = ms912x_add_safe_modes(connector);
 
 edid_free:
 	drm_edid_free(edid);

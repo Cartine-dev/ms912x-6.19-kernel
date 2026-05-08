@@ -1,0 +1,55 @@
+pkgname=aquamarine
+pkgver=0.11.0
+pkgrel=3
+pkgdesc="A very light linux rendering backend library"
+arch=(x86_64)
+url="https://github.com/hyprwm/aquamarine"
+license=(BSD-3-Clause)
+depends=(
+  gcc-libs
+  glibc
+  glib2
+  libdisplay-info
+  libdrm
+  libinput
+  seatd
+  mesa
+  pixman
+  systemd-libs
+  hyprutils
+)
+makedepends=(
+  cmake
+  git
+  hwdata
+  hyprwayland-scanner
+  libglvnd
+  pkgconf
+  wayland-protocols
+)
+provides=("aquamarine=${pkgver}")
+conflicts=(aquamarine)
+source=("aquamarine-ms912x-src.tar.gz")
+sha256sums=('SKIP')
+
+build() {
+  local srcdir_local="${srcdir}/${pkgname}-ms912x"
+
+  cmake -S "${srcdir_local}" -B "${srcdir_local}/build" \
+    -DCMAKE_BUILD_TYPE=Release \
+    -DCMAKE_INSTALL_PREFIX=/usr \
+    -DCMAKE_INSTALL_LIBDIR=lib
+
+  cmake --build "${srcdir_local}/build" -j"$(nproc)"
+}
+
+check() {
+  local srcdir_local="${srcdir}/${pkgname}-ms912x"
+  ctest --test-dir "${srcdir_local}/build" --output-on-failure || true
+}
+
+package() {
+  local srcdir_local="${srcdir}/${pkgname}-ms912x"
+  DESTDIR="${pkgdir}" cmake --install "${srcdir_local}/build"
+  install -Dm644 "${srcdir_local}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+}
