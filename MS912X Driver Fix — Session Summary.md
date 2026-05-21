@@ -129,3 +129,106 @@ O chip MS912X usa compressão para chegar nos 30fps, mas há overhead de encode 
 - **Aceitar o lag** — para uso com browser, editor de texto e coisas não interativas, 100-200ms é tolerável
 
 O problema de **mouse clonado** que você tinha (issue #29 no repo) você já resolveu com o full-frame fix. O lag infelizmente é a natureza do USB 2.0 display adapter .
+
+---
+
+## Atualização 2026-05-19 — HDMI-A-3 vertical sem "fora de escala"
+
+O problema mais recente não era driver, DKMS, kernel, Aquamarine nem boot. O módulo já carregava e o MS912X já funcionava. A falha veio da configuração do Hyprland: ao adicionar rotação vertical, o script passou a usar `1920x1080@30` com `transform,1`, e o LG via MS912X USB 2.0 rejeitou o sinal com `fora de escala` / `hsync out of range`.
+
+Modo confirmado funcionando:
+
+```bash
+HDMI-A-3,1280x720@60,3286x-100,1,transform,1
+```
+
+Correção aplicada em `~/.config/hypr/scripts/activate-usb-monitor.sh`:
+
+```bash
+monitor_spec='HDMI-A-3,1280x720@60,3286x-100,1,transform,1'
+```
+
+Também foram atualizados os comentários em `~/.config/hypr/monitors.conf` para registrar:
+
+- `HDMI-A-3` usa modo físico estável `1280x720@60`.
+- Com `transform,1`, a área lógica vira `720x1280`.
+- A posição explícita é `x=3286`, `y=-100`, logo à direita de `eDP-1` + `HDMI-A-1`.
+- `1920x1080@30` não deve ser usado nesse script para este LG via MS912X USB 2.0, porque causa `fora de escala`.
+
+Comandos usados para validar na sessão atual:
+
+```bash
+hyprctl keyword monitor "HDMI-A-3,disable"
+hyprctl keyword monitor "HDMI-A-3,1280x720@60,3286x-100,1,transform,1"
+hyprctl monitors all
+```
+
+Resultado confirmado em `hyprctl monitors all`:
+
+- `HDMI-A-3`
+- `1280x720@60.00000 at 3286x-100`
+- `transform: 1`
+- `disabled: false`
+
+Se no futuro a imagem vertical ficar invertida, trocar apenas `transform,1` por `transform,3`, mantendo `1280x720@60`.
+
+---
+
+## Atualização 2026-05-21 — recuperação de hotplug/replug no Hyprland
+
+O sintoma mudou: o boot/login e a ativação manual continuam usando o caminho estável, mas o monitor pode acender e apagar alguns segundos depois quando o DRM do MS912X some e reaparece durante a sessão. Esse caso é diferente do problema antigo de modo de vídeo ou tabela do driver.
+
+Assinatura nova a observar:
+
+- Eventos `remove`/`add`/`change` do DRM do MS912X durante a sessão.
+- Renumeração temporária de card, por exemplo o adaptador sair de `card0` e voltar como `card3`.
+- `HDMI-A-4` reaparecendo como conector fantasma após replug.
+- Hyprland perdendo o estado do output mesmo com o modo correto ainda sendo `HDMI-A-3,1280x720@60,3286x-100,1,transform,1`.
+
+Conclusão mantida: o patch do Aquamarine continua necessário. O caminho saudável ainda é identificado por logs como:
+
+```text
+drm: initMgpu: no renderer on {}, enabling CPU copy fallback with drm_dumb buffers
+drm: CPU copy fallback prepared a scanout buffer on {}
+```
+
+Se aparecer `Can't create renderer` ou `Failed to initialize renderer backend for blitting` sem o fallback preparado depois, o pacote `aquamarine` patchado provavelmente foi substituído ou não está sendo carregado. A fonte canônica de rebuild neste repo permanece `aquamarine-PKGBUILD`, com `pkgver=0.11.0`, `pkgrel=3`, `provides=("aquamarine=${pkgver}")` e `conflicts=(aquamarine)`.
+
+Decisão de implementação registrada:
+
+- Não alterar `ms912x_drv.c`, `ms912x_transfer.c`, `ms912x_connector.c` nem `dkms.conf` para esse sintoma.
+- Manter o modo conhecido como bom: `HDMI-A-3,1280x720@60,3286x-100,1,transform,1`.
+- Adicionar assets de referência no repo para recuperação operacional:
+  - `udev/99-ms912x-hotplug.rules`
+  - `scripts/ms912x-reconnect.sh`
+- Usar a abordagem mais robusta: udev apenas cria `/tmp/ms912x-reconnect-pending`; um watcher `systemd --user` executa o script como o usuário do desktop e fala com o socket correto do Hyprland.
+
+Racional: udev roda como root e não deve chamar `hyprctl` diretamente contra uma sessão gráfica de usuário. O watcher no `systemd --user` aguarda o Hyprland e o dispositivo assentarem, desabilita `HDMI-A-4` se ele reaparecer, reaplica `HDMI-A-3`, e grava logs para distinguir sucesso real, Hyprland ainda ausente, fallback do Aquamarine ausente, ou conector presente sem imagem.
+
+### Validação após instalação
+
+Após implementar os assets no repo, foi confirmado que isso sozinho não altera a sessão ativa: `udev/99-ms912x-hotplug.rules` dentro do repo ainda não é lido pelo sistema, e `scripts/ms912x-reconnect.sh` ainda não roda automaticamente. Com o monitor sem imagem nessa fase, a recuperação correta continuou sendo a ativação manual:
+
+```bash
+~/.config/hypr/scripts/activate-usb-monitor.sh
+```
+
+Esse comando trouxe a imagem de volta, confirmando que o baseline `HDMI-A-3,1280x720@60,3286x-100,1,transform,1` e o caminho do Aquamarine patchado continuam funcionando.
+
+Depois disso, os assets foram instalados no sistema:
+
+```bash
+sudo install -Dm644 udev/99-ms912x-hotplug.rules /etc/udev/rules.d/99-ms912x-hotplug.rules
+sudo udevadm control --reload-rules
+install -Dm755 scripts/ms912x-reconnect.sh ~/.local/bin/ms912x-reconnect.sh
+```
+
+Também foi criado e ativado o serviço `systemd --user`:
+
+```bash
+systemctl --user daemon-reload
+systemctl --user enable --now ms912x-reconnect.service
+systemctl --user status ms912x-reconnect.service
+```
+
+Estado esperado daqui em diante: se ocorrer um replug acidental ou churn do DRM do MS912X, udev atualiza `/tmp/ms912x-reconnect-pending`; o watcher do usuário detecta o trigger e reaplica `HDMI-A-3` automaticamente, sem intervenção manual.

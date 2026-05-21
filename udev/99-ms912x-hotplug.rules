@@ -1,0 +1,12 @@
+# Reference udev rule for MS912X DRM hotplug recovery.
+#
+# Install manually if needed:
+#   sudo install -Dm644 udev/99-ms912x-hotplug.rules /etc/udev/rules.d/99-ms912x-hotplug.rules
+#   sudo udevadm control --reload-rules
+#
+# This rule intentionally does not call hyprctl from udev. It only writes a
+# trigger stamp that a user-session watcher can consume after Hyprland settles.
+# The file is mode 0666 because udev writes it as root under /tmp.
+
+ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", ATTRS{idVendor}=="534d", ATTRS{idProduct}=="6021", RUN+="/bin/sh -c 'umask 000; /usr/bin/touch /tmp/ms912x-reconnect-pending; /bin/chmod 0666 /tmp/ms912x-reconnect-pending'"
+ACTION=="add|change", SUBSYSTEM=="drm", KERNEL=="card[0-9]*", ATTRS{idVendor}=="345f", ATTRS{idProduct}=="9132", RUN+="/bin/sh -c 'umask 000; /usr/bin/touch /tmp/ms912x-reconnect-pending; /bin/chmod 0666 /tmp/ms912x-reconnect-pending'"
