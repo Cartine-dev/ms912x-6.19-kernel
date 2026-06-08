@@ -8,8 +8,9 @@ set -u
 TRIGGER_FILE="${MS912X_TRIGGER_FILE:-/tmp/ms912x-reconnect-pending}"
 LOG_FILE="${MS912X_LOG_FILE:-${XDG_STATE_HOME:-$HOME/.local/state}/ms912x-reconnect.log}"
 SETTLE_SECONDS="${MS912X_SETTLE_SECONDS:-4}"
-MONITOR_SPEC="${MS912X_MONITOR_SPEC:-HDMI-A-3,1280x720@60,3286x-100,1,transform,1}"
-GHOST_SPEC="${MS912X_GHOST_SPEC:-HDMI-A-4,disable}"
+MONITOR_MODE_SPEC="${MS912X_MONITOR_MODE_SPEC:-1280x720@60,3286x-100,1,transform,1}"
+MONITOR_SERIAL="${MS912X_MONITOR_SERIAL:-207AZBZ77221}"
+FALLBACK_MONITOR_NAME="${MS912X_MONITOR_NAME:-HDMI-A-3}"
 
 log() {
     mkdir -p "$(dirname "$LOG_FILE")"
@@ -73,6 +74,48 @@ monitor_block() {
     '
 }
 
+ms912x_monitor_candidates() {
+    awk -v serial="$MONITOR_SERIAL" '
+        function flush() {
+            if (name ~ /^HDMI-A-[0-9]+$/ && (!serial || serial_seen))
+                print name
+        }
+
+        /^Monitor / {
+            if (name)
+                flush()
+            name = $2
+            serial_seen = 0
+        }
+
+        /^[[:space:]]*serial:/ {
+            value = $0
+            sub(/^[[:space:]]*serial:[[:space:]]*/, "", value)
+            if (value == serial)
+                serial_seen = 1
+        }
+
+        END {
+            if (name)
+                flush()
+        }
+    '
+}
+
+select_ms912x_monitor() {
+    local monitors="$1"
+    local selected
+
+    selected="$(
+        ms912x_monitor_candidates <<<"$monitors" \
+            | awk -F- '{print $3 " " $0}' \
+            | sort -n \
+            | awk 'END {print $2}'
+    )"
+
+    printf '%s\n' "${selected:-$FALLBACK_MONITOR_NAME}"
+}
+
 recover_once() {
     local trigger="${1:-manual}"
     local instance
@@ -97,34 +140,38 @@ recover_once() {
         return 1
     fi
 
-    if ! grep -q 'HDMI-A-3' <<<"$monitors"; then
-        log "fail: HDMI-A-3 not present after hotplug; current connectors: $(grep '^Monitor ' <<<"$monitors" | tr '\n' ';')"
+    local monitor_name
+    local monitor_spec
+    monitor_name="$(select_ms912x_monitor "$monitors")"
+    monitor_spec="$monitor_name,$MONITOR_MODE_SPEC"
+
+    if ! grep -q "^Monitor $monitor_name" <<<"$monitors"; then
+        log "fail: $monitor_name not present after hotplug; current connectors: $(grep '^Monitor ' <<<"$monitors" | tr '\n' ';')"
         return 1
     fi
 
-    if grep -q 'HDMI-A-4' <<<"$monitors"; then
-        if hypr "$instance" keyword monitor "$GHOST_SPEC" >>"$LOG_FILE" 2>&1; then
-            log "ghost: disabled $GHOST_SPEC"
+    while read -r candidate; do
+        [[ -n "$candidate" && "$candidate" != "$monitor_name" ]] || continue
+        if hypr "$instance" keyword monitor "$candidate,disable" >>"$LOG_FILE" 2>&1; then
+            log "stale: disabled $candidate"
         else
-            log "warn: failed to disable $GHOST_SPEC"
+            log "warn: failed to disable stale $candidate"
         fi
-    else
-        log "ghost: HDMI-A-4 absent"
-    fi
+    done < <(ms912x_monitor_candidates <<<"$monitors")
 
-    if hypr "$instance" keyword monitor "$MONITOR_SPEC" >>"$LOG_FILE" 2>&1; then
-        log "success: applied $MONITOR_SPEC"
+    if hypr "$instance" keyword monitor "$monitor_spec" >>"$LOG_FILE" 2>&1; then
+        log "success: applied $monitor_spec"
     else
-        log "fail: could not apply $MONITOR_SPEC"
+        log "fail: could not apply $monitor_spec"
         return 1
     fi
 
     sleep 2
     monitors="$(hypr "$instance" monitors all 2>&1 || true)"
-    if monitor_block "HDMI-A-3" <<<"$monitors" | grep -Eq '^[[:space:]]*disabled:[[:space:]]*false[[:space:]]*$'; then
-        log "verify: HDMI-A-3 enabled after recovery"
+    if monitor_block "$monitor_name" <<<"$monitors" | grep -Eq '^[[:space:]]*disabled:[[:space:]]*false[[:space:]]*$'; then
+        log "verify: $monitor_name enabled after recovery"
     else
-        log "warn: HDMI-A-3 present but not verified enabled; connector may have no image"
+        log "warn: $monitor_name present but not verified enabled; connector may have no image"
     fi
 }
 

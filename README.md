@@ -170,8 +170,8 @@ For the USB 2.0 `534d:6021` adapter with LG 22BN550Y:
 |---|---|---|
 | `~/.config/hypr/monitors.conf` | Monitor layout at boot | `eDP-1`, `HDMI-A-1` positions; `HDMI-A-3` starts disabled |
 | `~/.config/hypr/autostart.conf` | Autostart USB monitor | `exec-once = sleep 8 && ~/.config/hypr/scripts/activate-usb-monitor.sh` |
-| `~/.config/hypr/scripts/activate-usb-monitor.sh` | Activate USB monitor post-login | `monitor_spec`, `sleep 6`, CPU fallback detection |
-| `~/.local/bin/ms912x-reconnect.sh` | Hotplug/replug watcher action | Re-applies the known-good `HDMI-A-3` monitor spec after udev trigger |
+| `~/.config/hypr/scripts/activate-usb-monitor.sh` | Activate USB monitor post-login | Selects the current MS912X connector by serial, applies `1280x720@60`, waits for CPU fallback |
+| `~/.local/bin/ms912x-reconnect.sh` | Hotplug/replug watcher action | Re-applies the known-good mode after udev trigger, even if `HDMI-A-3` renumbered to `HDMI-A-4` |
 
 Only two scripts are used for the current workflow:
 
@@ -190,7 +190,8 @@ Older helper wrappers are intentionally not part of the current documented flow.
 # HDMI-A-3: 1280x720@60 physical → x=3286, y=-100, transform,1
 #           With transform,1, logical area becomes 720x1280.
 #           Do not use 1920x1080@30 here: it causes "fora de escala" on this LG via MS912X USB 2.0.
-# HDMI-A-4: ghost connector from MS912X replug — always disable
+# HDMI-A-4: may appear after USB/DRM churn; keep disabled at boot,
+#           but recovery scripts may activate it if it becomes the current MS912X connector.
 
 monitor = eDP-1,    1366x768@60,  0x156,   1
 monitor = HDMI-A-1, 1920x1080@60, 1366x0,  1
@@ -222,6 +223,8 @@ The script:
 3. Waits 6 seconds for CPU fallback to stabilize
 4. Only rolls back if `CPU copy fallback prepared` was **not** logged (real failure)
 
+After USB/DRM churn the same physical LG/MS912X output may come back as `HDMI-A-4` instead of `HDMI-A-3`. The activation script detects the current connector by monitor serial (`207AZBZ77221`) and applies the same safe mode to the highest matching `HDMI-A-N` connector.
+
 Use this first if the repo assets were just added but not installed yet. Files under this repository do not affect the live system until the udev rule is copied to `/etc/udev/rules.d/` and the user watcher is enabled. In that state, a blank `HDMI-A-3` is still the normal manual-activation case, not evidence that hotplug recovery failed.
 
 ### Hotplug/replug recovery path
@@ -235,10 +238,10 @@ This repo includes reference assets for manual installation:
 | `udev/99-ms912x-hotplug.rules` | `/etc/udev/rules.d/99-ms912x-hotplug.rules` | Detect MS912X DRM add/change events and touch `/tmp/ms912x-reconnect-pending` |
 | `scripts/ms912x-reconnect.sh` | User or system executable path | Run in the desktop user session, watch the trigger, and re-apply Hyprland monitor state |
 
-The udev rule intentionally does not call `hyprctl` as root. It only updates a trigger file timestamp. The reconnect script should run as the desktop user so it can find the active Hyprland socket, wait for the DRM device to settle, disable the ghost `HDMI-A-4` connector if present, and re-apply:
+The udev rule intentionally does not call `hyprctl` as root. It only updates a trigger file timestamp. The reconnect script should run as the desktop user so it can find the active Hyprland socket, wait for the DRM device to settle, select the current MS912X connector by serial, disable stale MS912X connector names, and re-apply:
 
 ```bash
-HDMI-A-3,1280x720@60,3286x-100,1,transform,1
+<current-HDMI-A-N>,1280x720@60,3286x-100,1,transform,1
 ```
 
 Manual install example:
@@ -281,7 +284,8 @@ Expected installed behavior:
 
 - The current session may still need one manual activation with `~/.config/hypr/scripts/activate-usb-monitor.sh` if `HDMI-A-3` is blank before the watcher is installed.
 - After the udev rule and user service are installed, accidental MS912X replug/churn should touch `/tmp/ms912x-reconnect-pending`.
-- The user watcher should notice that trigger and re-apply `HDMI-A-3,1280x720@60,3286x-100,1,transform,1` without manual intervention.
+- The user watcher should notice that trigger and re-apply `1280x720@60,3286x-100,1,transform,1` to the current MS912X connector without manual intervention.
+- If a replug renumbers the adapter, `HDMI-A-4` may be the real current output and `HDMI-A-3` may be stale. In that case the watcher should activate `HDMI-A-4` and disable stale MS912X connector names.
 
 Manual one-shot recovery without udev:
 
@@ -295,7 +299,7 @@ Logs are written to:
 ~/.local/state/ms912x-reconnect.log
 ```
 
-The log distinguishes Hyprland not running, missing patched Aquamarine fallback strings, missing `HDMI-A-3`, ghost `HDMI-A-4` disable attempts, and whether the known-good monitor spec was applied.
+The log distinguishes Hyprland not running, missing patched Aquamarine fallback strings, missing selected connector, stale MS912X connector disable attempts, and whether the known-good monitor spec was applied.
 
 ### HDMI-A-3 vertical recovery note (2026-05-19)
 
@@ -331,11 +335,11 @@ Why this matters: adding `transform,1` to `1920x1080@30` reintroduced the monito
 | Monitor no signal after script | `sleep` too short, fallback not ready | Increase `sleep 6` → `sleep 8` in script |
 | Script rolls back after activation | `new_renderer_errors()` triggered before fallback confirmed | Check `sleep 6` is present in script |
 | LG shows `fora de escala` on HDMI-A-3 | Script used `1920x1080@30` with rotation | Use `HDMI-A-3,1280x720@60,3286x-100,1,transform,1` |
-| `HDMI-A-4` appears after replug | Ghost connector from kernel after rmmod/modprobe without USB replug | `hyprctl keyword monitor "HDMI-A-4,disable"` |
+| `HDMI-A-4` appears after replug | MS912X DRM card renumbered; `HDMI-A-4` may be the current connector, while `HDMI-A-3` may be stale | Run `scripts/ms912x-reconnect.sh --once manual`; it should select the highest matching MS912X connector by serial |
 | Monitor works, then blanks a few seconds later | MS912X DRM remove/add or change event during session | Install the reference udev trigger and run `ms912x-reconnect.sh --watch` as the Hyprland user |
-| Logs show `card0` removed or the adapter returns as `card3` | Kernel DRM card numbers churned after USB replug | Use `/dev/dri/by-path/...usb...-card` for diagnostics; keep Hyprland output config as `HDMI-A-3` |
+| Logs show `card0` removed or the adapter returns as `card3` | Kernel DRM card numbers churned after USB replug | Use `/dev/dri/by-path/...usb...-card` for diagnostics; scripts should select the current `HDMI-A-N` by serial |
 | Reconnect script logs Aquamarine fallback absent | Patched `aquamarine` was replaced or is not loaded | Rebuild and reinstall from `aquamarine-PKGBUILD`, then restart Hyprland |
-| Reconnect script applies HDMI-A-3 but there is still no image | Connector exists, but fallback scanout did not become usable | Check Hyprland logs for `CPU copy fallback prepared`; check `journalctl` for MS912X USB/DRM churn |
+| Reconnect script applies a connector but there is still no image | Connector exists, but fallback scanout did not become usable | Check Hyprland logs for `CPU copy fallback prepared`; check `journalctl` for MS912X USB/DRM churn |
 | `preferred` resolution freezes USB | Chip selects `1680x1050`, exceeds USB 2.0 bandwidth | Always use explicit `1280x720@60` |
 | ABI mismatch on `pacman -U` | SONAME/provides mismatch between patched and installed Aquamarine/Hyprland | Rebuild with `provides=("libaquamarine.so=11-64")` for Hyprland `0.55.2-2` |
 
@@ -349,4 +353,4 @@ rg 'CPU copy fallback|Failed to initialize renderer backend for blitting|Can.t c
 hyprctl monitors all
 ```
 
-The `/dev/dri/by-path/...usb...-card` symlink is useful for confirming which DRM card belongs to the USB adapter after renumbering. Hyprland still addresses the output by connector name, so the monitor command remains `HDMI-A-3,1280x720@60,3286x-100,1,transform,1`.
+The `/dev/dri/by-path/...usb...-card` symlink is useful for confirming which DRM card belongs to the USB adapter after renumbering. Hyprland still addresses the output by connector name, but the connector name can move from `HDMI-A-3` to `HDMI-A-4`; the scripts choose the current connector by monitor serial and then apply `1280x720@60,3286x-100,1,transform,1`.

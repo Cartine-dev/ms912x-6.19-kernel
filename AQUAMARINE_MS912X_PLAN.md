@@ -100,6 +100,16 @@ Expected:
 - `HDMI-A-3` is `1280x720@60`, position `3286x-100`, `transform: 1`, `disabled: false`
 - Hyprland log repeatedly shows `CPU copy fallback prepared a scanout buffer on /dev/dri/card0`
 
+## Hotplug Renumbering Note
+
+After USB/DRM churn, the MS912X card can disappear as `card0` and return as a higher DRM minor such as `card3`. Hyprland may then expose the same physical LG monitor as `HDMI-A-4` while the old `HDMI-A-3` entry remains stale.
+
+The reconnect and activation scripts must not assume `HDMI-A-4` is always a ghost. They select the current MS912X connector by monitor serial (`207AZBZ77221`), prefer the highest matching `HDMI-A-N` name after renumbering, disable stale MS912X connector names, and apply:
+
+```text
+1280x720@60,3286x-100,1,transform,1
+```
+
 ## Boundaries
 
 - Keep `1280x720@60` for the USB monitor. Do not use `1920x1080@30` for this LG/MS912X USB 2.0 path; it causes monitor-side `fora de escala`.
