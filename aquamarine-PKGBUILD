@@ -1,6 +1,6 @@
 pkgname=aquamarine
-pkgver=0.11.0
-pkgrel=3
+pkgver=0.12.0
+pkgrel=2
 pkgdesc="A very light linux rendering backend library"
 arch=(x86_64)
 url="https://github.com/hyprwm/aquamarine"
@@ -8,48 +8,56 @@ license=(BSD-3-Clause)
 depends=(
   gcc-libs
   glibc
-  glib2
+  hyprutils
+  hyprwayland-scanner
   libdisplay-info
   libdrm
+  libglvnd
   libinput
-  seatd
   mesa
+  opengl-driver
   pixman
+  pugixml
+  seatd
   systemd-libs
-  hyprutils
+  wayland
+  wayland-protocols
 )
 makedepends=(
   cmake
   git
   hwdata
-  hyprwayland-scanner
-  libglvnd
   pkgconf
-  wayland-protocols
 )
-provides=("aquamarine=${pkgver}")
-conflicts=(aquamarine)
-source=("aquamarine-ms912x-src.tar.gz")
-sha256sums=('SKIP')
+provides=("libaquamarine.so=11-64")
+source=(
+  "git+${url}.git#tag=v${pkgver}"
+  "aquamarine-ms912x-cpu-fallback.patch"
+)
+sha256sums=(
+  'SKIP'
+  '3bcf7a9185082a9152f4405a60b956b846c37c0b8805cdb3f51afeec9b1befd3'
+)
+
+prepare() {
+  cd "${srcdir}/${pkgname}"
+  patch -Np1 -i "${srcdir}/aquamarine-ms912x-cpu-fallback.patch"
+}
 
 build() {
-  local srcdir_local="${srcdir}/${pkgname}-ms912x"
-
-  cmake -S "${srcdir_local}" -B "${srcdir_local}/build" \
+  cmake -S "${srcdir}/${pkgname}" -B "${srcdir}/${pkgname}/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX=/usr \
     -DCMAKE_INSTALL_LIBDIR=lib
 
-  cmake --build "${srcdir_local}/build" -j"$(nproc)"
+  cmake --build "${srcdir}/${pkgname}/build" -j"$(nproc)"
 }
 
 check() {
-  local srcdir_local="${srcdir}/${pkgname}-ms912x"
-  ctest --test-dir "${srcdir_local}/build" --output-on-failure || true
+  ctest --test-dir "${srcdir}/${pkgname}/build" --output-on-failure || true
 }
 
 package() {
-  local srcdir_local="${srcdir}/${pkgname}-ms912x"
-  DESTDIR="${pkgdir}" cmake --install "${srcdir_local}/build"
-  install -Dm644 "${srcdir_local}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
+  DESTDIR="${pkgdir}" cmake --install "${srcdir}/${pkgname}/build"
+  install -Dm644 "${srcdir}/${pkgname}/LICENSE" "${pkgdir}/usr/share/licenses/${pkgname}/LICENSE"
 }

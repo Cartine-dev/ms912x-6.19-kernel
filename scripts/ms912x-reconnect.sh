@@ -50,12 +50,27 @@ aquamarine_fallback_present() {
 
     while read -r _ path; do
         [[ -r "$path" && "$path" == *.so* ]] || continue
-        if strings "$path" 2>/dev/null | grep -qiE 'CPU copy fallback|drm_dumb'; then
+        local markers
+        markers="$(strings "$path" 2>/dev/null || true)"
+        if grep -q 'CPU copy fallback' <<<"$markers" && grep -q 'CPU copy fallback prepared' <<<"$markers"; then
             return 0
         fi
     done < <(pacman -Ql aquamarine 2>/dev/null)
 
     return 1
+}
+
+monitor_block() {
+    local monitor_name="$1"
+
+    awk -v monitor="$monitor_name" '
+        /^Monitor / {
+            in_block = ($2 == monitor)
+        }
+        in_block {
+            print
+        }
+    '
 }
 
 recover_once() {
@@ -106,7 +121,7 @@ recover_once() {
 
     sleep 2
     monitors="$(hypr "$instance" monitors all 2>&1 || true)"
-    if grep -A12 '^Monitor HDMI-A-3' <<<"$monitors" | grep -q 'disabled: false'; then
+    if monitor_block "HDMI-A-3" <<<"$monitors" | grep -Eq '^[[:space:]]*disabled:[[:space:]]*false[[:space:]]*$'; then
         log "verify: HDMI-A-3 enabled after recovery"
     else
         log "warn: HDMI-A-3 present but not verified enabled; connector may have no image"

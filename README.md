@@ -51,18 +51,35 @@ sudo insmod ms912x.ko
 
 ## DKMS (Arch linux-lts)
 
-For `linux-lts` on `6.18.25-1-lts`, build against the target kernel explicitly:
+For the known-good `linux-lts` baseline on `6.18.34-1-lts`, build against the target kernel explicitly:
 
 ```bash
-make clean KVER=6.18.25-1-lts
-make KVER=6.18.25-1-lts
+make clean KVER=6.18.34-1-lts
+make KVER=6.18.34-1-lts
 sudo dkms remove ms912x/0.1 --all
-sudo dkms install . -k 6.18.25-1-lts
-sudo depmod 6.18.25-1-lts
+sudo dkms install . -k 6.18.34-1-lts
+sudo depmod 6.18.34-1-lts
 modinfo ms912x | grep vermagic
 ```
 
-Expected `vermagic`: `6.18.25-1-lts`
+Expected `vermagic`: `6.18.34-1-lts`
+
+Known-good boot/runtime check:
+
+```bash
+uname -r
+pacman -Q linux-lts
+modinfo ms912x | rg 'filename|vermagic'
+```
+
+Expected output:
+
+```text
+6.18.34-1-lts
+linux-lts 6.18.34-1
+filename:       /lib/modules/6.18.34-1-lts/updates/dkms/ms912x.ko.zst
+vermagic:       6.18.34-1-lts SMP preempt mod_unload
+```
 
 ---
 
@@ -72,30 +89,42 @@ This branch includes a patch for `aquamarine` to support the `ms912x` DRM backen
 
 For this Hyprland setup, the patched Aquamarine package is part of the known-good baseline. The MS912X DRM device may not provide a renderer usable for normal blitting, so Hyprland must be able to fall back to CPU copy into `drm_dumb` scanout buffers.
 
+Known-good package baseline:
+
+```text
+aquamarine 0.12.0-2
+hyprland 0.55.2-2
+linux-lts 6.18.34-1
+```
+
 ### Build patched aquamarine package
 
+Build from a temporary packaging directory. The file in this repo is named `aquamarine-PKGBUILD` so it does not conflict with the kernel driver's own build files.
+
 ```bash
-cp aquamarine-PKGBUILD /tmp/PKGBUILD
-cd /tmp
-makepkg -si --noconfirm
+mkdir -p /tmp/aquamarine-ms912x-pkg-0.12.0
+cp aquamarine-PKGBUILD /tmp/aquamarine-ms912x-pkg-0.12.0/PKGBUILD
+cp aquamarine-ms912x-cpu-fallback.patch /tmp/aquamarine-ms912x-pkg-0.12.0/
+cd /tmp/aquamarine-ms912x-pkg-0.12.0
+makepkg -si
 ```
 
 > The patch enables `CPU copy fallback` for secondary DRM devices (card0) without a direct EGL renderer.
 > EGL errors (`eglQueryDeviceStringEXT`, `Can't create renderer`) are **expected and normal** on this path.
+> Restart Hyprland or reboot after installing: `libaquamarine` is loaded when the compositor starts.
 
 ### Verify patched aquamarine is installed
 
 Check package identity:
 
 ```bash
-pacman -Qi aquamarine
-pacman -Q aquamarine
+pacman -Q aquamarine hyprland linux-lts
 ```
 
 Check the installed library for the fallback strings:
 
 ```bash
-strings "$(pacman -Ql aquamarine | awk '/\.so/ {print $2; exit}')" | grep -iE 'cpu copy fallback|drm_dumb|dumb'
+strings /usr/lib/libaquamarine.so | rg 'CPU copy fallback'
 ```
 
 Expected patched-path markers include:
@@ -109,7 +138,19 @@ Failure split:
 
 - `CPU copy fallback prepared` in the Hyprland log means the patched path is active and the secondary DRM backend has a prepared scanout buffer.
 - `Can't create renderer` or `Failed to initialize renderer backend for blitting` without a later CPU fallback success means the patched package is missing, was replaced, or Hyprland is not loading it.
-- `aquamarine-PKGBUILD` is the canonical rebuild source for this repo. Keep its package identity aligned with the repo-supported patched workflow: `pkgver=0.11.0`, `pkgrel=3`, `provides=("aquamarine=${pkgver}")`, and `conflicts=(aquamarine)`.
+- `aquamarine-PKGBUILD` is the canonical rebuild source for this repo. Keep it aligned with the repo-supported patched workflow: `pkgver=0.12.0`, `pkgrel=2`, and `provides=("libaquamarine.so=11-64")`.
+
+Runtime log check:
+
+```bash
+rg 'CPU copy fallback|Failed to initialize renderer backend for blitting|Can.t create renderer' /run/user/1000/hypr/*/hyprland.log | tail -n 80
+```
+
+Expected successful runtime behavior is repeated scanout preparation lines like:
+
+```text
+DEBUG from aquamarine ]: drm: CPU copy fallback prepared a scanout buffer on /dev/dri/card0
+```
 
 ---
 
@@ -130,6 +171,14 @@ For the USB 2.0 `534d:6021` adapter with LG 22BN550Y:
 | `~/.config/hypr/monitors.conf` | Monitor layout at boot | `eDP-1`, `HDMI-A-1` positions; `HDMI-A-3` starts disabled |
 | `~/.config/hypr/autostart.conf` | Autostart USB monitor | `exec-once = sleep 8 && ~/.config/hypr/scripts/activate-usb-monitor.sh` |
 | `~/.config/hypr/scripts/activate-usb-monitor.sh` | Activate USB monitor post-login | `monitor_spec`, `sleep 6`, CPU fallback detection |
+| `~/.local/bin/ms912x-reconnect.sh` | Hotplug/replug watcher action | Re-applies the known-good `HDMI-A-3` monitor spec after udev trigger |
+
+Only two scripts are used for the current workflow:
+
+- `scripts/hypr/activate-usb-monitor.sh` -> install to `~/.config/hypr/scripts/activate-usb-monitor.sh`
+- `scripts/ms912x-reconnect.sh` -> install to `~/.local/bin/ms912x-reconnect.sh`
+
+Older helper wrappers are intentionally not part of the current documented flow. Use the two scripts above directly so there is one activation path and one hotplug recovery path.
 
 ### monitors.conf (reference layout)
 
@@ -153,6 +202,12 @@ monitor = HDMI-A-4, disable
 
 ```ini
 exec-once = sleep 8 && ~/.config/hypr/scripts/activate-usb-monitor.sh
+```
+
+Install the activation script:
+
+```bash
+install -Dm755 scripts/hypr/activate-usb-monitor.sh ~/.config/hypr/scripts/activate-usb-monitor.sh
 ```
 
 ### Activating the USB monitor manually
@@ -282,7 +337,7 @@ Why this matters: adding `transform,1` to `1920x1080@30` reintroduced the monito
 | Reconnect script logs Aquamarine fallback absent | Patched `aquamarine` was replaced or is not loaded | Rebuild and reinstall from `aquamarine-PKGBUILD`, then restart Hyprland |
 | Reconnect script applies HDMI-A-3 but there is still no image | Connector exists, but fallback scanout did not become usable | Check Hyprland logs for `CPU copy fallback prepared`; check `journalctl` for MS912X USB/DRM churn |
 | `preferred` resolution freezes USB | Chip selects `1680x1050`, exceeds USB 2.0 bandwidth | Always use explicit `1280x720@60` |
-| ABI mismatch on `pacman -U` | SONAME/pkgrel mismatch between patched and installed aquamarine | Rebuild with correct `pkgrel`, check `SOVERSION 10` in CMakeLists.txt |
+| ABI mismatch on `pacman -U` | SONAME/provides mismatch between patched and installed Aquamarine/Hyprland | Rebuild with `provides=("libaquamarine.so=11-64")` for Hyprland `0.55.2-2` |
 
 Useful diagnostics:
 
@@ -290,7 +345,8 @@ Useful diagnostics:
 ls -l /dev/dri/by-path/*usb*-card
 journalctl --user -u ms912x-reconnect.service -b
 journalctl -b | grep -iE 'ms912x|534d|6021|345f|9132|drm'
-grep -i 'CPU copy fallback' ~/.cache/hyprland/hyprland.log
+rg 'CPU copy fallback|Failed to initialize renderer backend for blitting|Can.t create renderer' /run/user/1000/hypr/*/hyprland.log | tail -n 80
+hyprctl monitors all
 ```
 
 The `/dev/dri/by-path/...usb...-card` symlink is useful for confirming which DRM card belongs to the USB adapter after renumbering. Hyprland still addresses the output by connector name, so the monitor command remains `HDMI-A-3,1280x720@60,3286x-100,1,transform,1`.

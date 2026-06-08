@@ -1,20 +1,27 @@
-diff --git i/include/aquamarine/backend/DRM.hpp w/include/aquamarine/backend/DRM.hpp
-index f85c8de..1edcadf 100644
---- i/include/aquamarine/backend/DRM.hpp
-+++ w/include/aquamarine/backend/DRM.hpp
-@@ -429,6 +429,7 @@ namespace Aquamarine {
+diff --git a/include/aquamarine/backend/DRM.hpp b/include/aquamarine/backend/DRM.hpp
+index 1303efd..f6528f3 100644
+--- a/include/aquamarine/backend/DRM.hpp
++++ b/include/aquamarine/backend/DRM.hpp
+@@ -448,6 +448,7 @@ namespace Aquamarine {
          struct {
              Hyprutils::Memory::CSharedPointer<IAllocator>   allocator;
              Hyprutils::Memory::CSharedPointer<CDRMRenderer> renderer; // may be null if creation fails
 +            bool                                            cpuCopyFallback = false;
          } rendererState;
  
-         Hyprutils::Memory::CWeakPointer<CBackend>                     backend;
-diff --git i/src/backend/drm/DRM.cpp w/src/backend/drm/DRM.cpp
-index 0ae0434..668ec44 100644
---- i/src/backend/drm/DRM.cpp
-+++ w/src/backend/drm/DRM.cpp
-@@ -93,6 +93,134 @@ static int gpuNumBuiltinPanels(const SP<CSessionDevice> gpu) {
+         bool                                                          rendererRequired = true;
+diff --git a/src/backend/drm/DRM.cpp b/src/backend/drm/DRM.cpp
+index c7be2f2..ec16421 100644
+--- a/src/backend/drm/DRM.cpp
++++ b/src/backend/drm/DRM.cpp
+@@ -1,5 +1,6 @@
+ #include "aquamarine/output/Output.hpp"
+ #include <algorithm>
++#include <array>
+ #include <aquamarine/backend/DRM.hpp>
+ #include <aquamarine/backend/drm/Legacy.hpp>
+ #include <aquamarine/backend/drm/Atomic.hpp>
+@@ -93,6 +94,134 @@ static int gpuNumBuiltinPanels(const SP<CSessionDevice> gpu) {
      return num;
  }
  
@@ -56,10 +63,10 @@ index 0ae0434..668ec44 100644
 +        return false;
 +    }
 +
-+    const auto width      = (size_t)size.x;
-+    const auto height     = (size_t)size.y;
-+    const auto srcStride  = width * 4;
-+    const auto dstStride  = (size_t)dma.strides.at(0);
++    const auto width       = (size_t)size.x;
++    const auto height      = (size_t)size.y;
++    const auto srcStride   = width * 4;
++    const auto dstStride   = (size_t)dma.strides.at(0);
 +    const auto bytesNeeded = dstStride * height;
 +
 +    if (srcRGBA.size() < srcStride * height || dstLen < bytesNeeded) {
@@ -149,16 +156,16 @@ index 0ae0434..668ec44 100644
  static std::vector<SP<CSessionDevice>> scanGPUs(SP<CBackend> backend) {
      auto enumerate = enumDRMCards(backend->session->udevHandle);
  
-@@ -605,6 +733,8 @@ bool Aquamarine::CDRMBackend::shouldBlit() {
- }
+@@ -629,6 +758,8 @@ bool Aquamarine::CDRMBackend::initMgpu() {
+     if (!rendererRequired)
+         return true;
  
- bool Aquamarine::CDRMBackend::initMgpu() {
 +    rendererState.cpuCopyFallback = false;
 +
      SP<CGBMAllocator> newAllocator;
      if (primary || backend->primaryAllocator->type() != AQ_ALLOCATOR_TYPE_GBM) {
          newAllocator            = CGBMAllocator::create(backend->reopenDRMNode(gpu->fd), backend);
-@@ -622,6 +752,13 @@ bool Aquamarine::CDRMBackend::initMgpu() {
+@@ -646,6 +777,13 @@ bool Aquamarine::CDRMBackend::initMgpu() {
      rendererState.renderer = CDRMRenderer::attempt(backend.lock(), gpu->renderNodeFd >= 0 ? gpu->renderNodeFd : gpu->fd);
  
      if (!rendererState.renderer) {
@@ -172,7 +179,7 @@ index 0ae0434..668ec44 100644
          backend->log(AQ_LOG_ERROR, "drm: initMgpu: no renderer");
          return false;
      }
-@@ -638,7 +775,7 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
+@@ -662,7 +800,7 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
          return true;
  
      if (!primary) {
@@ -181,7 +188,7 @@ index 0ae0434..668ec44 100644
              return true;
  
          return initMgpu();
-@@ -648,14 +785,14 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
+@@ -672,14 +810,14 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
          std::ranges::any_of(connectors, [](const auto& c) { return c->status == DRM_MODE_CONNECTED && c->output && c->output->state && c->output->state->state().enabled; });
  
      if (hasEnabledOutputs) {
@@ -198,7 +205,7 @@ index 0ae0434..668ec44 100644
          return true;
  
      backend->log(AQ_LOG_DEBUG, std::format("drm: Deinitializing secondary renderer on {}, no enabled outputs", gpu->path));
-@@ -672,6 +809,7 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
+@@ -696,6 +834,7 @@ bool Aquamarine::CDRMBackend::updateSecondaryRendererState() {
  
      rendererState.renderer.reset();
      rendererState.allocator.reset();
@@ -206,7 +213,7 @@ index 0ae0434..668ec44 100644
  
      return true;
  }
-@@ -1920,9 +2058,10 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+@@ -2025,9 +2164,10 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
          SP<CDRMFB> drmFB;
  
          if (backend->shouldBlit()) {
@@ -219,7 +226,7 @@ index 0ae0434..668ec44 100644
                      backend->backend->log(AQ_LOG_ERROR, "drm: Failed to initialize renderer backend for blitting");
                      return false;
                  }
-@@ -1938,11 +2077,17 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+@@ -2043,11 +2183,17 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
              auto OPTIONS = swapchain->currentOptions();
              auto bufDma  = STATE.buffer->dmabuf();
              OPTIONS.size = STATE.buffer->size;
@@ -238,7 +245,7 @@ index 0ae0434..668ec44 100644
              if (!mgpu.swapchain->reconfigure(OPTIONS)) {
                  backend->backend->log(AQ_LOG_ERROR, "drm: Backend requires blit, but the mgpu swapchain failed reconfiguring");
                  return false;
-@@ -1952,20 +2097,30 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
+@@ -2057,20 +2203,30 @@ bool Aquamarine::CDRMOutput::commitState(bool onlyTest) {
              SP<Aquamarine::CDRMRenderer> primaryRenderer;
              if (backend->primary)
                  primaryRenderer = backend->primary->rendererState.renderer;

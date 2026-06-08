@@ -1,91 +1,107 @@
-# Aquamarine MS912X CPU-Blit Fallback Plan
+# Aquamarine MS912X CPU-Copy Fallback Result
 
-## Current State
+## Current Known-Good Baseline
 
-- Running kernel target: `6.18.25-1-lts`
-- Driver repo branch: `kernel-6.18-lts-hypr-stability`
-- Kernel-side mode hardening is already in place:
-  - `ms912x_drv.c` uses the validated `1920x1080@30` / `0x2200` path
-  - `ms912x_transfer.c` keeps the frame limiter / timeout / full-frame fixes
-  - `ms912x_connector.c` now exposes only a synthetic safe `1920x1080@30` mode
-- Hyprland-side safety changes are already in place:
-  - `~/.config/uwsm/env` exports:
-    - `AQ_DRM_DEVICES=/dev/dri/card2:/dev/dri/card0`
-    - `AQ_NO_MODIFIERS=1`
-    - `AQ_MGPU_NO_EXPLICIT=1`
-    - `AQ_NO_ATOMIC=1`
-  - `~/.config/environment.d/90-aquamarine-drm.conf` no longer injects the old global `AQ_DRM_DEVICES`
-  - `~/.config/hypr/monitors.conf` keeps `HDMI-A-3` disabled at login
-  - `~/.config/hypr/scripts/activate-usb-monitor.sh` activates `HDMI-A-3` at `1920x1080@30` and rolls back only on new renderer errors
+- Kernel: `linux-lts 6.18.34-1-lts`
+- Driver module: `/lib/modules/6.18.34-1-lts/updates/dkms/ms912x.ko.zst`
+- Aquamarine: patched `aquamarine 0.12.0-2`
+- Hyprland: `0.55.2-2`
+- USB monitor spec: `HDMI-A-3,1280x720@60,3286x-100,1,transform,1`
 
-## What Is Already Proven
+Validated runtime output:
 
-- DKMS/header mismatch was a real problem earlier, but it is no longer the main blocker.
-- Hyprland/Aquamarine can now modeset the MS912X output at the safe mode.
-- The remaining failure is after modeset:
-  - Aquamarine logs: `CDRMRenderer(drm): Can't create renderer, no matching devices found`
-- Root cause:
-  - `card0` (`ms912x`) is a KMS output device with no EGL-capable render node
-  - Aquamarine's multi-GPU path still tries to create a renderer for that secondary DRM device
-  - Result: black screen on the USB monitor even though modesetting succeeds
+```text
+drm: CPU copy fallback prepared a scanout buffer on /dev/dri/card0
+```
 
-## Conclusion
+The LG monitor connected through the MS912X USB 2.0 adapter displays image again at the known-good `1280x720@60` physical mode with Hyprland rotation.
 
-The next real repair is not another kernel patch. The next repair is an Aquamarine patch.
+## What Was Fixed
 
-## Target Plan
+The MS912X DRM device is a KMS output device without a usable EGL renderer/render node for Aquamarine's normal multi-GPU blit path. Before the patch, enabling the USB monitor led to repeated renderer failures:
 
-### Stage 1: Cheap Config Check
+```text
+CDRMRenderer(drm): Can't create renderer, no matching devices found
+drm: Failed to initialize renderer backend for blitting
+```
 
-Before patching source, run one last low-risk runtime check:
+The Aquamarine patch changes the secondary DRM backend behavior:
 
-- test `AQ_FORCE_LINEAR_BLIT=1` in the Hyprland/Aquamarine environment
-- optionally enable trace logging to confirm the exact failure path
+1. Try the normal renderer path first.
+2. If the secondary backend has no renderer but has `drm_dumb` buffers and a primary renderer is available, enable CPU copy fallback.
+3. Render/read from the primary renderer.
+4. Copy RGBA pixels into a CPU-mapped `drm_dumb` scanout buffer.
+5. Submit that buffer through the existing DRM framebuffer path.
 
-If the logs still end in `Can't create renderer, no matching devices found`, continue to source patching.
+Expected fallback markers:
 
-### Stage 2: Patch Aquamarine 0.11.0
+```text
+drm: initMgpu: no renderer on {}, enabling CPU copy fallback with drm_dumb buffers
+drm: CPU copy fallback prepared a scanout buffer on {}
+```
 
-Target package:
+## Repository Artifacts
 
-- installed package: `aquamarine 0.11.0-2`
-- keep ABI/package compatibility with installed `hyprland 0.54.3-4`
+Canonical files for the current workflow:
 
-Implementation direction:
+| File | Purpose |
+|---|---|
+| `aquamarine-PKGBUILD` | Builds patched Aquamarine `0.12.0-2` from upstream tag `v0.12.0` |
+| `aquamarine-ms912x-cpu-fallback.patch` | Rebased CPU copy fallback patch for Aquamarine `0.12.0` |
+| `scripts/hypr/activate-usb-monitor.sh` | Manual/autostart Hyprland activation for `HDMI-A-3` |
+| `scripts/ms912x-reconnect.sh` | User-session hotplug watcher action for MS912X DRM churn |
+| `udev/99-ms912x-hotplug.rules` | Root-side udev trigger; touches `/tmp/ms912x-reconnect-pending` only |
 
-- patch Aquamarine's DRM backend multi-GPU path
-- in `CDRMBackend::initMgpu()`, detect secondary DRM devices with no usable render node
-- if `CDRMRenderer::attempt()` fails for such a device, do not fail the output outright
-- use a CPU fallback for that device:
-  - keep scanout on a dumb DRM buffer (`CDRMDumbAllocator`)
-  - render on the primary i915 path
-  - read back CPU-visible pixels from the primary rendered frame
-  - copy CPU pixel data into the dumb buffer through `beginDataPtr()` / `endDataPtr()`
-  - submit through the existing DRM framebuffer path
+The active scripts are only:
 
-### Stage 3: Package and Install Correctly
+- `scripts/hypr/activate-usb-monitor.sh`
+- `scripts/ms912x-reconnect.sh`
 
-- build a local Arch package with `makepkg`
-- install via `pacman`, not by replacing shared libraries manually
-- keep rollback simple by restoring the stock `aquamarine` package from pacman cache
+Older helper wrappers are intentionally not used in the current documented flow.
 
-## Expected Result
+## Build And Install
 
-After a successful Aquamarine patch:
+Build the patched Aquamarine package from a temporary directory:
 
-- `HDMI-A-3` enables without the repeated renderer failure
-- the USB monitor shows real desktop content instead of staying black
-- performance may remain modest, which is acceptable for the first working target
+```bash
+mkdir -p /tmp/aquamarine-ms912x-pkg-0.12.0
+cp aquamarine-PKGBUILD /tmp/aquamarine-ms912x-pkg-0.12.0/PKGBUILD
+cp aquamarine-ms912x-cpu-fallback.patch /tmp/aquamarine-ms912x-pkg-0.12.0/
+cd /tmp/aquamarine-ms912x-pkg-0.12.0
+makepkg -si
+```
 
-## Important Boundary
+Restart Hyprland or reboot after installing the package. Rebooting into `linux-lts` is preferred because it also verifies the DKMS module target.
 
-This repository contains the kernel driver, not Aquamarine itself.
+Install the live scripts:
 
-So the work is now split into two tracks:
+```bash
+install -Dm755 scripts/hypr/activate-usb-monitor.sh ~/.config/hypr/scripts/activate-usb-monitor.sh
+install -Dm755 scripts/ms912x-reconnect.sh ~/.local/bin/ms912x-reconnect.sh
+```
 
-1. `ms912x-6.19-kernel` remains the driver source of record
-2. Aquamarine patching must happen in a separate package source tree
+## Verification
 
-## Next Practical Step
+```bash
+uname -r
+pacman -Q aquamarine hyprland linux-lts
+modinfo ms912x | rg 'filename|vermagic'
+strings /usr/lib/libaquamarine.so | rg 'CPU copy fallback'
+hyprctl monitors all
+rg 'CPU copy fallback|Failed to initialize renderer backend for blitting|Can.t create renderer' /run/user/1000/hypr/*/hyprland.log | tail -n 80
+```
 
-Create or fetch a local `aquamarine 0.11.0-2` package worktree, then implement and test the CPU-blit fallback there.
+Expected:
+
+- `uname -r` is `6.18.34-1-lts`
+- `pacman -Q aquamarine` is `aquamarine 0.12.0-2`
+- `modinfo ms912x` points under `/lib/modules/6.18.34-1-lts/updates/dkms/`
+- `vermagic` is `6.18.34-1-lts`
+- `HDMI-A-3` is `1280x720@60`, position `3286x-100`, `transform: 1`, `disabled: false`
+- Hyprland log repeatedly shows `CPU copy fallback prepared a scanout buffer on /dev/dri/card0`
+
+## Boundaries
+
+- Keep `1280x720@60` for the USB monitor. Do not use `1920x1080@30` for this LG/MS912X USB 2.0 path; it causes monitor-side `fora de escala`.
+- Do not manually replace shared libraries. Always install the patched Aquamarine package through `makepkg`/`pacman`.
+- The udev rule must not run `hyprctl` as root. It only updates the trigger file; the user service performs Hyprland actions in the desktop session.
